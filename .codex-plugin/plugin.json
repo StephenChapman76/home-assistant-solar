@@ -1,0 +1,18 @@
+{
+  "name": "home-assistant-solar",
+  "version": "0.1.0",
+  "description": "Read-only Home Assistant solar and GivEnergy battery context for forecasts and charge recommendations.",
+  "author": {
+    "name": "StephenChapman76"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Home Assistant Solar",
+    "shortDescription": "Read live solar and battery state safely.",
+    "longDescription": "Uses a narrowly exposed Home Assistant Assist MCP connection to read seven GivTCP solar and battery sensors for forecasts and charge recommendations. It prohibits Home Assistant write and control actions.",
+    "developerName": "StephenChapman76",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Read my current Home Assistant solar and battery state, then summarize it without making any changes."
+  }
+}

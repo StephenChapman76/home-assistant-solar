@@ -1,0 +1,4 @@
+interface:
+  display_name: "Home Assistant Solar"
+  short_description: "Read live solar and battery state safely"
+  default_prompt: "Use the read-only Home Assistant solar connection to summarize current PV, load, grid, battery power, SOC, stored energy, and today's generation. Do not perform any Home Assistant action."

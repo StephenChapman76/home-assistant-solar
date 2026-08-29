@@ -1,0 +1,9 @@
+configuration:
+  tunnel_id:
+    name: OpenAI tunnel ID
+    description: The tunnel_ identifier created on the OpenAI Platform Tunnels page. This identifier is not an API key.
+  openai_runtime_api_key:
+    name: OpenAI runtime API key
+    description: A runtime API key whose user has Tunnels Read and Use permissions. Keep this key secret.
+network:
+  8080/tcp: Tunnel health endpoint; leave disabled unless troubleshooting locally.
