@@ -1,5 +1,5 @@
 name: OpenAI Solar Tunnel
-version: "0.1.0"
+version: "0.2.0"
 slug: openai_solar_tunnel
 description: Connect selected Home Assistant solar sensors to an OpenAI Secure MCP Tunnel
 url: https://github.com/StephenChapman76/home-assistant-solar

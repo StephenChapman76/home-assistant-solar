@@ -7,9 +7,14 @@ ARG BUILD_ARCH
 ARG BUILD_VERSION
 
 COPY --from=tunnel_client /usr/bin/tunnel-client /usr/local/bin/tunnel-client
+COPY mcp_readonly_proxy.py /usr/local/bin/mcp_readonly_proxy.py
 COPY run.sh /
 
-RUN chmod 0755 /run.sh /usr/local/bin/tunnel-client
+RUN apk add --no-cache python3 \
+    && chmod 0755 \
+        /run.sh \
+        /usr/local/bin/tunnel-client \
+        /usr/local/bin/mcp_readonly_proxy.py
 
 LABEL \
   io.hass.version="${BUILD_VERSION}" \

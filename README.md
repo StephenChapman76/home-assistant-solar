@@ -1,6 +1,6 @@
 # Home Assistant Solar Tunnel
 
-A small Home Assistant app that connects the built-in Home Assistant MCP Server to an OpenAI Secure MCP Tunnel. It is designed for a local-only Home Assistant installation and needs no inbound router port, public Home Assistant URL, Nabu Casa subscription, or long-lived Home Assistant access token.
+A small Home Assistant app that connects the built-in Home Assistant MCP Server to an OpenAI Secure MCP Tunnel through a fail-closed read-only filter. It is designed for a local-only Home Assistant installation and needs no inbound router port, public Home Assistant URL, Nabu Casa subscription, or long-lived Home Assistant access token.
 
 The companion `home-assistant-solar` skill adds a strict read-only workflow for seven GivTCP solar and battery sensors.
 
@@ -8,7 +8,8 @@ The companion `home-assistant-solar` skill adds a strict read-only workflow for 
 
 - The app makes outbound HTTPS connections to OpenAI.
 - Home Assistant injects a short-lived internal Supervisor token when the app starts.
-- The tunnel target is fixed to `http://supervisor/core/api/mcp/assist`.
+- A local filter sits between the tunnel and `http://supervisor/core/api/mcp/assist`.
+- Only `GetLiveContext` is advertised or callable; every Home Assistant action is blocked server-side.
 - Home Assistant remains the source of truth for which entities are exposed.
 - The intended Assist exposure list contains sensors only; no inverter controls are included.
 - OpenAI runtime API keys are entered in Home Assistant's masked app configuration and are never stored in this repository.

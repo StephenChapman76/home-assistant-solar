@@ -5,7 +5,7 @@
 Confirm all of the following:
 
 1. The Home Assistant **Model Context Protocol Server** integration is installed.
-2. Assist exposes only the intended read-only solar sensors.
+2. Assist exposes only the intended seven solar and battery sensors.
 3. No GivTCP control, switch, number, select, automation, scene, or script is exposed.
 4. An OpenAI Secure MCP Tunnel has been created for the correct organization and ChatGPT workspace.
 5. You have a separate OpenAI runtime API key. Do not use an admin key for the running app.
@@ -35,7 +35,9 @@ Never paste the runtime API key into chat, screenshots, GitHub, or diagnostic lo
 
 ## Read-only boundary
 
-The app forwards requests only to Home Assistant's built-in `/api/mcp/assist` endpoint. The exposed-entity list and the MCP Server's **Control Home Assistant** option determine what Assist can provide. For this solar workflow, expose sensor entities only and keep control disabled when the option is available.
+The app forwards requests to Home Assistant's built-in `/api/mcp/assist` endpoint through a fail-closed local filter. The filter exposes only `GetLiveContext`, adds explicit read-only annotations, and rejects every other tool call before it reaches Assist. Home Assistant's exposed-entity list remains the source of truth for which sensor states `GetLiveContext` can return.
+
+Home Assistant currently requires the Assist API to be selected when its MCP Server integration is configured. Assist may internally advertise control tools; app version 0.2.0 and later removes those tools at the tunnel boundary.
 
 The intended sensor set is:
 

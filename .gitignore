@@ -2,3 +2,5 @@
 *.log
 secrets.yaml
 options.json
+__pycache__/
+*.py[cod]
