@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Fail-closed MCP proxy that exposes only Home Assistant live context."""
+"""Fail-closed MCP proxy for Home Assistant and read-only Ultrahuman data."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import sys
+from datetime import date as date_type
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -22,9 +24,22 @@ UPSTREAM_URL = os.environ.get(
     "MCP_PROXY_UPSTREAM_URL", "http://supervisor/core/api/mcp/assist"
 )
 UPSTREAM_AUTHORIZATION = os.environ.get("MCP_PROXY_UPSTREAM_AUTHORIZATION", "")
+ULTRAHUMAN_API_TOKEN = os.environ.get("ULTRAHUMAN_API_TOKEN", "")
+ULTRAHUMAN_API_URL = (
+    "https://partner.ultrahuman.com/api/v1/partner/daily_metrics"
+)
+ULTRAHUMAN_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 
-ALLOWED_TOOL_SUFFIX = "GetLiveContext"
+HOME_ASSISTANT_TOOL = "GetLiveContext"
+ULTRAHUMAN_DAILY_TOOL = "GetUltrahumanDailyMetrics"
+ULTRAHUMAN_RECOVERY_TOOL = "GetUltrahumanRecoverySummary"
+ALLOWED_TOOL_SUFFIXES = {
+    HOME_ASSISTANT_TOOL,
+    ULTRAHUMAN_DAILY_TOOL,
+    ULTRAHUMAN_RECOVERY_TOOL,
+}
 ALLOWED_RESOURCE_URI = "homeassistant://assist/context-snapshot"
+MISSING = object()
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -37,10 +52,73 @@ HOP_BY_HOP_HEADERS = {
     "upgrade",
 }
 
+READ_ONLY_ANNOTATIONS = {
+    "readOnlyHint": True,
+    "destructiveHint": False,
+    "openWorldHint": False,
+    "idempotentHint": True,
+}
+
+ULTRAHUMAN_TOOLS = [
+    {
+        "name": ULTRAHUMAN_DAILY_TOOL,
+        "description": (
+            "Retrieve the authenticated user's full Ultrahuman daily metrics for "
+            "one date. Read-only; does not alter Ultrahuman data."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Date in YYYY-MM-DD format.",
+                }
+            },
+            "required": ["date"],
+            "additionalProperties": False,
+        },
+        "annotations": READ_ONLY_ANNOTATIONS,
+    },
+    {
+        "name": ULTRAHUMAN_RECOVERY_TOOL,
+        "description": (
+            "Retrieve a concise Ultrahuman sleep and recovery summary for one "
+            "date. Read-only; intended for training-readiness assessment."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Date in YYYY-MM-DD format.",
+                }
+            },
+            "required": ["date"],
+            "additionalProperties": False,
+        },
+        "annotations": READ_ONLY_ANNOTATIONS,
+    },
+]
+
+
+def _tool_suffix(name: Any) -> str | None:
+    if not isinstance(name, str):
+        return None
+    return name.split("__")[-1]
+
 
 def _tool_is_allowed(name: Any) -> bool:
-    """Return whether a tool is the read-only live-context tool."""
-    return isinstance(name, str) and name.split("__")[-1] == ALLOWED_TOOL_SUFFIX
+    """Return whether a tool is on the explicit read-only allowlist."""
+    return _tool_suffix(name) in ALLOWED_TOOL_SUFFIXES
+
+
+def _ultrahuman_tool(name: Any) -> str | None:
+    suffix = _tool_suffix(name)
+    if suffix in {ULTRAHUMAN_DAILY_TOOL, ULTRAHUMAN_RECOVERY_TOOL}:
+        return suffix
+    return None
 
 
 def _resource_is_allowed(uri: Any) -> bool:
@@ -49,7 +127,7 @@ def _resource_is_allowed(uri: Any) -> bool:
 
 
 def _filter_result(message: Any) -> Any:
-    """Filter tool and resource discovery results in one JSON-RPC message."""
+    """Filter tool/resource discovery and inject the Ultrahuman read tools."""
     if not isinstance(message, dict):
         return message
 
@@ -61,16 +139,12 @@ def _filter_result(message: Any) -> Any:
     if isinstance(tools, list):
         filtered_tools = []
         for tool in tools:
-            if not isinstance(tool, dict) or not _tool_is_allowed(tool.get("name")):
+            if not isinstance(tool, dict) or _tool_suffix(tool.get("name")) != HOME_ASSISTANT_TOOL:
                 continue
             safe_tool = dict(tool)
-            safe_tool["annotations"] = {
-                "readOnlyHint": True,
-                "destructiveHint": False,
-                "openWorldHint": False,
-                "idempotentHint": True,
-            }
+            safe_tool["annotations"] = READ_ONLY_ANNOTATIONS
             filtered_tools.append(safe_tool)
+        filtered_tools.extend(dict(tool) for tool in ULTRAHUMAN_TOOLS)
         result["tools"] = filtered_tools
 
     resources = result.get("resources")
@@ -137,25 +211,163 @@ def blocked_request(payload: bytes) -> tuple[Any, str] | None:
             params = {}
 
         if method == "tools/call" and not _tool_is_allowed(params.get("name")):
-            return message.get("id"), "Only read-only Home Assistant live context is allowed"
+            return message.get("id"), "Only explicitly allowlisted read-only tools are available"
         if method == "resources/read" and not _resource_is_allowed(params.get("uri")):
             return message.get("id"), "Only the read-only Assist context snapshot is allowed"
     return None
 
 
-def blocked_response(request_id: Any, reason: str) -> bytes:
-    """Build an MCP tool error response for a blocked request."""
+def _mcp_result(request_id: Any, data: Any, *, is_error: bool = False) -> bytes:
+    """Build an MCP JSON-RPC tool result with a JSON text payload."""
+    if isinstance(data, str):
+        text = data
+    else:
+        text = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
     return json.dumps(
         {
             "jsonrpc": "2.0",
             "id": request_id,
             "result": {
-                "content": [{"type": "text", "text": reason}],
-                "isError": True,
+                "content": [{"type": "text", "text": text}],
+                "isError": is_error,
             },
         },
         separators=(",", ":"),
+        ensure_ascii=False,
     ).encode()
+
+
+def blocked_response(request_id: Any, reason: str) -> bytes:
+    """Build an MCP tool error response for a blocked request."""
+    return _mcp_result(request_id, reason, is_error=True)
+
+
+def _validated_date(arguments: Any) -> str:
+    if not isinstance(arguments, dict) or set(arguments) != {"date"}:
+        raise ValueError("Exactly one argument is required: date in YYYY-MM-DD format")
+    value = arguments.get("date")
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise ValueError("date must use YYYY-MM-DD format")
+    try:
+        parsed = date_type.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("date is not a valid calendar date") from error
+    if parsed.isoformat() != value:
+        raise ValueError("date must use YYYY-MM-DD format")
+    return value
+
+
+def _fetch_ultrahuman_metrics(metric_date: str) -> Any:
+    """Fetch one day's metrics using the fixed Ultrahuman read-only endpoint."""
+    if not ULTRAHUMAN_API_TOKEN:
+        raise RuntimeError("Ultrahuman API token is not configured")
+
+    url = f"{ULTRAHUMAN_API_URL}?{urlencode({'date': metric_date})}"
+    request = Request(
+        url,
+        headers={
+            "Authorization": ULTRAHUMAN_API_TOKEN,
+            "Accept": "application/json",
+            "User-Agent": "home-assistant-solar-ultrahuman/0.3.0",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            payload = response.read(ULTRAHUMAN_MAX_RESPONSE_BYTES + 1)
+    except HTTPError as error:
+        if error.code in {401, 403}:
+            raise RuntimeError("Ultrahuman rejected the configured API token") from error
+        if error.code == 404:
+            raise RuntimeError(f"Ultrahuman returned no data for {metric_date}") from error
+        if error.code == 429:
+            raise RuntimeError("Ultrahuman rate limit reached; try again later") from error
+        raise RuntimeError(f"Ultrahuman API request failed with HTTP {error.code}") from error
+    except (URLError, TimeoutError) as error:
+        raise RuntimeError("Ultrahuman API is temporarily unavailable") from error
+
+    if len(payload) > ULTRAHUMAN_MAX_RESPONSE_BYTES:
+        raise RuntimeError("Ultrahuman response exceeded the safe size limit")
+    try:
+        return json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise RuntimeError("Ultrahuman returned an invalid JSON response") from error
+
+
+def _normal_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower()) if isinstance(value, str) else ""
+
+
+def _find_metric(value: Any, candidate_keys: tuple[str, ...]) -> Any:
+    """Find the first named metric in a nested API response."""
+    wanted = {_normal_key(key) for key in candidate_keys}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if _normal_key(key) in wanted:
+                return item
+        for item in value.values():
+            found = _find_metric(item, candidate_keys)
+            if found is not MISSING:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_metric(item, candidate_keys)
+            if found is not MISSING:
+                return found
+    return MISSING
+
+
+def _recovery_summary(metric_date: str, metrics: Any) -> dict[str, Any]:
+    fields = {
+        "recovery_score": ("recovery_score", "recovery"),
+        "sleep_score": ("sleep_score",),
+        "average_sleep_hrv": ("avg_sleep_hrv", "average_sleep_hrv"),
+        "sleeping_resting_hr": ("sleep_rhr", "night_rhr"),
+        "total_sleep": ("total_sleep",),
+        "deep_sleep": ("deep_sleep",),
+        "rem_sleep": ("rem_sleep",),
+        "sleep_efficiency": ("sleep_efficiency",),
+        "temperature_deviation": ("temperature_deviation",),
+        "spo2": ("spo2",),
+        "recovery_index": ("recovery_index",),
+    }
+    summary: dict[str, Any] = {"date": metric_date}
+    missing = []
+    for output_name, candidates in fields.items():
+        value = _find_metric(metrics, candidates)
+        if value is MISSING:
+            missing.append(output_name)
+        else:
+            summary[output_name] = value
+    if missing:
+        summary["missing_fields"] = missing
+    return summary
+
+
+def direct_tool_response(payload: bytes) -> bytes | None:
+    """Handle one Ultrahuman tool call locally; return None for other requests."""
+    messages = _request_messages(payload)
+    if len(messages) != 1:
+        return None
+    message = messages[0]
+    if message.get("method") != "tools/call":
+        return None
+    params = message.get("params")
+    if not isinstance(params, dict):
+        return None
+    tool = _ultrahuman_tool(params.get("name"))
+    if tool is None:
+        return None
+
+    request_id = message.get("id")
+    try:
+        metric_date = _validated_date(params.get("arguments"))
+        metrics = _fetch_ultrahuman_metrics(metric_date)
+        if tool == ULTRAHUMAN_RECOVERY_TOOL:
+            metrics = _recovery_summary(metric_date, metrics)
+        return _mcp_result(request_id, metrics)
+    except (ValueError, RuntimeError) as error:
+        return _mcp_result(request_id, str(error), is_error=True)
 
 
 class ReadOnlyProxyHandler(BaseHTTPRequestHandler):
@@ -172,6 +384,14 @@ class ReadOnlyProxyHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         content_length = int(self.headers.get("Content-Length", "0"))
         payload = self.rfile.read(content_length)
+        direct_response = direct_tool_response(payload)
+        if direct_response is not None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(direct_response)))
+            self.end_headers()
+            self.wfile.write(direct_response)
+            return
         blocked = blocked_request(payload)
         if blocked is not None:
             request_id, reason = blocked
@@ -283,10 +503,10 @@ def main() -> None:
     )
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), ReadOnlyProxyHandler)
     LOGGER.info(
-        "Read-only MCP proxy listening on %s:%d; allowed tool=%s",
+        "Read-only MCP proxy listening on %s:%d; allowed tools=%s",
         LISTEN_HOST,
         LISTEN_PORT,
-        ALLOWED_TOOL_SUFFIX,
+        ",".join(sorted(ALLOWED_TOOL_SUFFIXES)),
     )
     server.serve_forever()
 

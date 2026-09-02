@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Added read-only access to the official Ultrahuman Daily Metrics API.
+- Added `GetUltrahumanDailyMetrics` for a complete single-day response.
+- Added `GetUltrahumanRecoverySummary` for concise training-readiness metrics.
+- Stored the Ultrahuman Personal API Token only in masked Home Assistant app configuration.
+- Kept the Home Assistant server boundary fail-closed; no new Home Assistant actions are exposed.
+
 ## 0.2.0
 
 - Added a fail-closed MCP proxy that exposes only `GetLiveContext`.
