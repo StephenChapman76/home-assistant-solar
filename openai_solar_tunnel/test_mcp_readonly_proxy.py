@@ -1,15 +1,19 @@
-"""Tests for the fail-closed Home Assistant MCP proxy."""
+"""Tests for the fail-closed Home Assistant and Ultrahuman MCP proxy."""
 
 import json
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 import mcp_readonly_proxy as proxy
 from mcp_readonly_proxy import (
     ALLOWED_RESOURCE_URI,
+    ULTRAHUMAN_DAILY_TOOL,
+    ULTRAHUMAN_RECOVERY_TOOL,
     blocked_request,
+    direct_tool_response,
     filter_response_payload,
     filter_sse_line,
 )
@@ -46,6 +50,17 @@ class MockUpstreamHandler(BaseHTTPRequestHandler):
         return
 
 
+def tool_call(name: str, arguments: dict, request_id: int = 1) -> bytes:
+    return json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        }
+    ).encode()
+
+
 class ReadOnlyProxyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -75,7 +90,7 @@ class ReadOnlyProxyTests(unittest.TestCase):
         cls.upstream.shutdown()
         cls.upstream.server_close()
 
-    def test_filters_tools_and_adds_read_only_annotations(self) -> None:
+    def test_filters_tools_and_adds_read_only_tools(self) -> None:
         payload = json.dumps(
             {
                 "jsonrpc": "2.0",
@@ -93,46 +108,40 @@ class ReadOnlyProxyTests(unittest.TestCase):
         decoded = json.loads(filter_response_payload(payload))
         tools = decoded["result"]["tools"]
 
-        self.assertEqual([tool["name"] for tool in tools], ["homeassistant__GetLiveContext"])
         self.assertEqual(
-            tools[0]["annotations"],
-            {
-                "readOnlyHint": True,
-                "destructiveHint": False,
-                "openWorldHint": False,
-                "idempotentHint": True,
-            },
+            [tool["name"] for tool in tools],
+            [
+                "homeassistant__GetLiveContext",
+                ULTRAHUMAN_DAILY_TOOL,
+                ULTRAHUMAN_RECOVERY_TOOL,
+            ],
         )
+        for tool in tools:
+            self.assertEqual(
+                tool["annotations"],
+                {
+                    "readOnlyHint": True,
+                    "destructiveHint": False,
+                    "openWorldHint": False,
+                    "idempotentHint": True,
+                },
+            )
 
     def test_blocks_write_tool_call(self) -> None:
-        request = json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": 8,
-                "method": "tools/call",
-                "params": {"name": "HassTurnOff", "arguments": {}},
-            }
-        ).encode()
-
+        request = tool_call("HassTurnOff", {})
         self.assertEqual(
             blocked_request(request),
-            (8, "Only read-only Home Assistant live context is allowed"),
+            (1, "Only explicitly allowlisted read-only tools are available"),
         )
 
-    def test_allows_live_context_tool_call(self) -> None:
-        request = json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": 9,
-                "method": "tools/call",
-                "params": {
-                    "name": "homeassistant__GetLiveContext",
-                    "arguments": {},
-                },
-            }
-        ).encode()
-
-        self.assertIsNone(blocked_request(request))
+    def test_allows_each_read_only_tool_call(self) -> None:
+        for name in (
+            "homeassistant__GetLiveContext",
+            ULTRAHUMAN_DAILY_TOOL,
+            ULTRAHUMAN_RECOVERY_TOOL,
+        ):
+            with self.subTest(name=name):
+                self.assertIsNone(blocked_request(tool_call(name, {"date": "2026-09-02"})))
 
     def test_filters_resources(self) -> None:
         payload = json.dumps(
@@ -163,8 +172,54 @@ class ReadOnlyProxyTests(unittest.TestCase):
         decoded = json.loads(filtered.removeprefix(b"data: "))
         self.assertEqual(
             [tool["name"] for tool in decoded["result"]["tools"]],
-            ["GetLiveContext"],
+            ["GetLiveContext", ULTRAHUMAN_DAILY_TOOL, ULTRAHUMAN_RECOVERY_TOOL],
         )
+
+    def test_daily_metrics_tool_returns_full_response(self) -> None:
+        metrics = {"data": {"recovery": 82, "sleep_score": 79}}
+        with patch.object(proxy, "_fetch_ultrahuman_metrics", return_value=metrics):
+            response = direct_tool_response(
+                tool_call(ULTRAHUMAN_DAILY_TOOL, {"date": "2026-09-02"}, 4)
+            )
+
+        decoded = json.loads(response)
+        self.assertFalse(decoded["result"]["isError"])
+        self.assertEqual(json.loads(decoded["result"]["content"][0]["text"]), metrics)
+
+    def test_recovery_summary_extracts_nested_fields(self) -> None:
+        metrics = {
+            "data": {
+                "scores": {"recovery": 82, "sleep_score": 79},
+                "sleep": {
+                    "avg_sleep_hrv": 41,
+                    "night_rhr": 51,
+                    "deep_sleep": 91,
+                },
+            }
+        }
+        with patch.object(proxy, "_fetch_ultrahuman_metrics", return_value=metrics):
+            response = direct_tool_response(
+                tool_call(ULTRAHUMAN_RECOVERY_TOOL, {"date": "2026-09-02"}, 5)
+            )
+
+        summary = json.loads(json.loads(response)["result"]["content"][0]["text"])
+        self.assertEqual(summary["date"], "2026-09-02")
+        self.assertEqual(summary["recovery_score"], 82)
+        self.assertEqual(summary["sleep_score"], 79)
+        self.assertEqual(summary["average_sleep_hrv"], 41)
+        self.assertEqual(summary["sleeping_resting_hr"], 51)
+        self.assertEqual(summary["deep_sleep"], 91)
+        self.assertIn("temperature_deviation", summary["missing_fields"])
+
+    def test_rejects_invalid_date_without_api_request(self) -> None:
+        with patch.object(proxy, "_fetch_ultrahuman_metrics") as fetch:
+            response = direct_tool_response(
+                tool_call(ULTRAHUMAN_DAILY_TOOL, {"date": "02-09-2026"})
+            )
+
+        decoded = json.loads(response)
+        self.assertTrue(decoded["result"]["isError"])
+        fetch.assert_not_called()
 
     def test_http_proxy_filters_discovery_and_injects_internal_auth(self) -> None:
         request = Request(
@@ -181,7 +236,11 @@ class ReadOnlyProxyTests(unittest.TestCase):
 
         self.assertEqual(
             [tool["name"] for tool in decoded["result"]["tools"]],
-            ["homeassistant__GetLiveContext"],
+            [
+                "homeassistant__GetLiveContext",
+                ULTRAHUMAN_DAILY_TOOL,
+                ULTRAHUMAN_RECOVERY_TOOL,
+            ],
         )
         self.assertEqual(
             MockUpstreamHandler.authorization, "Bearer internal-test-token"
@@ -191,14 +250,7 @@ class ReadOnlyProxyTests(unittest.TestCase):
         calls_before = MockUpstreamHandler.calls
         request = Request(
             self.proxy_url,
-            data=json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "id": 5,
-                    "method": "tools/call",
-                    "params": {"name": "HassBroadcast", "arguments": {}},
-                }
-            ).encode(),
+            data=tool_call("HassBroadcast", {}, 7),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -207,6 +259,22 @@ class ReadOnlyProxyTests(unittest.TestCase):
             decoded = json.loads(response.read())
 
         self.assertTrue(decoded["result"]["isError"])
+        self.assertEqual(MockUpstreamHandler.calls, calls_before)
+
+    def test_http_proxy_handles_ultrahuman_without_forwarding_to_home_assistant(self) -> None:
+        calls_before = MockUpstreamHandler.calls
+        request = Request(
+            self.proxy_url,
+            data=tool_call(ULTRAHUMAN_DAILY_TOOL, {"date": "2026-09-02"}, 8),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        with patch.object(proxy, "_fetch_ultrahuman_metrics", return_value={"recovery": 80}):
+            with urlopen(request) as response:
+                decoded = json.loads(response.read())
+
+        self.assertFalse(decoded["result"]["isError"])
         self.assertEqual(MockUpstreamHandler.calls, calls_before)
 
 

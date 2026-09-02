@@ -1,7 +1,7 @@
 name: OpenAI Solar Tunnel
-version: "0.2.0"
+version: "0.3.0"
 slug: openai_solar_tunnel
-description: Connect selected Home Assistant solar sensors to an OpenAI Secure MCP Tunnel
+description: Connect selected Home Assistant and Ultrahuman data to an OpenAI Secure MCP Tunnel
 url: https://github.com/StephenChapman76/home-assistant-solar
 arch:
   - aarch64
@@ -14,9 +14,11 @@ homeassistant_api: true
 options:
   tunnel_id: null
   openai_runtime_api_key: null
+  ultrahuman_api_token: null
 schema:
   tunnel_id: "match(^tunnel_[0-9a-f]{32}$)"
   openai_runtime_api_key: password
+  ultrahuman_api_token: password
 ports:
   8080/tcp: null
 ports_description:

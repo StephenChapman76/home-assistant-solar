@@ -7,6 +7,9 @@ CONTROL_PLANE_TUNNEL_ID="$(bashio::config 'tunnel_id')"
 export CONTROL_PLANE_API_KEY
 CONTROL_PLANE_API_KEY="$(bashio::config 'openai_runtime_api_key')"
 
+export ULTRAHUMAN_API_TOKEN
+ULTRAHUMAN_API_TOKEN="$(bashio::config 'ultrahuman_api_token')"
+
 export MCP_PROXY_UPSTREAM_AUTHORIZATION="Bearer ${SUPERVISOR_TOKEN}"
 export MCP_PROXY_UPSTREAM_URL="http://supervisor/core/api/mcp/assist"
 export MCP_PROXY_LISTEN_HOST="127.0.0.1"
@@ -18,8 +21,8 @@ export HEALTH_LISTEN_ADDR=":8080"
 export LOG_LEVEL="info"
 export LOG_FORMAT="struct-text"
 
-bashio::log.info "Starting the read-only Home Assistant MCP filter"
-bashio::log.info "Allowing GetLiveContext only; all Home Assistant actions are blocked"
+bashio::log.info "Starting the read-only Home Assistant and Ultrahuman MCP filter"
+bashio::log.info "Allowing GetLiveContext and two read-only Ultrahuman tools only"
 bashio::log.info "Home Assistant remains local; no inbound port is opened"
 
 python3 /usr/local/bin/mcp_readonly_proxy.py &
