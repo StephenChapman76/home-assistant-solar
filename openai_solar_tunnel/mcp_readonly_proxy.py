@@ -268,7 +268,7 @@ def _fetch_ultrahuman_metrics(metric_date: str) -> Any:
         headers={
             "Authorization": ULTRAHUMAN_API_TOKEN,
             "Accept": "application/json",
-            "User-Agent": "home-assistant-solar-ultrahuman/0.3.0",
+            "User-Agent": "home-assistant-solar-ultrahuman/0.3.1",
         },
         method="GET",
     )
@@ -298,13 +298,25 @@ def _normal_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower()) if isinstance(value, str) else ""
 
 
+def _metric_entry_value(value: Any) -> Any:
+    """Return the concise value from an Ultrahuman typed metric object."""
+    if not isinstance(value, dict):
+        return value
+    for key in ("value", "avg", "score", "percentage", "minutes", "celsius"):
+        if key in value:
+            return value[key]
+    return value
+
+
 def _find_metric(value: Any, candidate_keys: tuple[str, ...]) -> Any:
     """Find the first named metric in a nested API response."""
     wanted = {_normal_key(key) for key in candidate_keys}
     if isinstance(value, dict):
+        if _normal_key(value.get("type")) in wanted and "object" in value:
+            return _metric_entry_value(value["object"])
         for key, item in value.items():
             if _normal_key(key) in wanted:
-                return item
+                return _metric_entry_value(item)
         for item in value.values():
             found = _find_metric(item, candidate_keys)
             if found is not MISSING:

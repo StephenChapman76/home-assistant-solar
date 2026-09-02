@@ -190,11 +190,12 @@ class ReadOnlyProxyTests(unittest.TestCase):
         metrics = {
             "data": {
                 "scores": {"recovery": 82, "sleep_score": 79},
-                "sleep": {
-                    "avg_sleep_hrv": 41,
-                    "night_rhr": 51,
-                    "deep_sleep": 91,
-                },
+                "metrics": [
+                    {"type": "avg_sleep_hrv", "object": {"value": 41}},
+                    {"type": "night_rhr", "object": {"avg": 51}},
+                    {"type": "recovery_index", "object": {"value": 82}},
+                ],
+                "sleep": {"deep_sleep": 91},
             }
         }
         with patch.object(proxy, "_fetch_ultrahuman_metrics", return_value=metrics):
@@ -209,6 +210,7 @@ class ReadOnlyProxyTests(unittest.TestCase):
         self.assertEqual(summary["average_sleep_hrv"], 41)
         self.assertEqual(summary["sleeping_resting_hr"], 51)
         self.assertEqual(summary["deep_sleep"], 91)
+        self.assertEqual(summary["recovery_index"], 82)
         self.assertIn("temperature_deviation", summary["missing_fields"])
 
     def test_rejects_invalid_date_without_api_request(self) -> None:
