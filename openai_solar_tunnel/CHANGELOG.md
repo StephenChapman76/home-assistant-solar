@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Fixed recovery-summary extraction for Ultrahuman's typed metric objects.
+- Added automatic extraction of average sleep HRV, sleeping resting HR, and Recovery Index.
+- Continues to report an overall Recovery Score as missing when Ultrahuman does not supply one.
+
 ## 0.3.0
 
 - Added read-only access to the official Ultrahuman Daily Metrics API.
